@@ -61,7 +61,7 @@ func main() {
 	check("concurrent O_DIRECT writers and readers", testConcurrent())
 	check("discard gives back memory", testDiscardMemory())
 	check("partitions", testPartitions())
-	check("load fat, vfat", loadAll("/extra/fat.ko.zst", "/extra/vfat.ko.zst"))
+	check("load fat, vfat", loadAll("/extra/nls_iso8859-1.ko.zst", "/extra/fat.ko.zst", "/extra/vfat.ko.zst"))
 	check("Linux vfat on gobrd", testVfat())
 	if failed {
 		fmt.Println("brdtest: FAILED")
@@ -192,6 +192,9 @@ func loadModule(path, params string) error {
 
 func loadAll(paths ...string) error {
 	for _, p := range paths {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			continue
+		}
 		if err := loadModule(p, ""); err != nil {
 			return err
 		}

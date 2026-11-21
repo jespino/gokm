@@ -1,4 +1,4 @@
-// Command infotest checks /proc/gosysinfo inside the QEMU VM (-smp 2, -m 512).
+// Command infotest checks /proc/gosysinfo inside the QEMU VM (-smp 2).
 package main
 
 import (
@@ -48,8 +48,10 @@ func main() {
 	if field(info, "cpus") != "2" {
 		problems = append(problems, "cpus != 2")
 	}
-	if total < 300 || total > 512 {
-		problems = append(problems, "ram_total_mib not in 300..512")
+	var si syscall.Sysinfo_t
+	syscall.Sysinfo(&si)
+	if want := int(uint64(si.Totalram) * uint64(si.Unit) >> 20); total != want {
+		problems = append(problems, fmt.Sprintf("ram_total_mib != sysinfo(2) (%d)", want))
 	}
 	if field(info, "timespec") != "1.500000000" {
 		problems = append(problems, "timespec (by-value struct return)")
