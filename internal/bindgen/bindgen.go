@@ -30,7 +30,7 @@ import (
 	"strings"
 	"unicode"
 
-	"gokm/internal/btf"
+	"github.com/jespino/gokm/internal/btf"
 )
 
 // Gen resolves names against a kernel's BTF and exports.

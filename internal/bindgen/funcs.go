@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode"
 
-	"gokm/internal/btf"
+	"github.com/jespino/gokm/internal/btf"
 )
 
 // Function signatures, from BTF (exported functions) or DWARF (static inline

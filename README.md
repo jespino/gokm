@@ -52,7 +52,7 @@ headers for the target kernel (`linux-headers` on Arch; they include
 `objcopy`).
 
 ```sh
-go install .          # or: make  (builds ./gokm)
+go install github.com/jespino/gokm@latest
 ```
 
 See [Installation](https://jespino.github.io/gokm/docs/install/) for details.

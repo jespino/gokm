@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"gokm/internal/btf"
+	"github.com/jespino/gokm/internal/btf"
 )
 
 func TestGoName(t *testing.T) {

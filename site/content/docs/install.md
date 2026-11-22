@@ -18,13 +18,19 @@ weight: 1
 ## Install gokm
 
 ```sh
-git clone https://github.com/jespino/gokm
-cd gokm
-go install .          # or: make  (builds ./gokm)
+go install github.com/jespino/gokm@latest
 ```
 
 `go install` puts `gokm` in `$(go env GOPATH)/bin`; make sure it's in your
 `PATH`. Then follow the [tutorial](/docs/tutorial/).
+
+To build from source instead:
+
+```sh
+git clone https://github.com/jespino/gokm
+cd gokm
+go install .          # or: make  (builds ./gokm)
+```
 
 > [!CAUTION]
 > A kernel module runs with full privileges inside the kernel: a bug can

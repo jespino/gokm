@@ -23,8 +23,8 @@ import (
 	"sort"
 	"strings"
 
-	"gokm/internal/assets"
-	"gokm/internal/bindgen"
+	"github.com/jespino/gokm/internal/assets"
+	"github.com/jespino/gokm/internal/bindgen"
 )
 
 // Options configure a build.

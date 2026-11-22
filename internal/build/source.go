@@ -16,8 +16,8 @@ import (
 	"strconv"
 	"strings"
 
-	"gokm/internal/bindgen"
-	"gokm/internal/btf"
+	"github.com/jespino/gokm/internal/bindgen"
+	"github.com/jespino/gokm/internal/btf"
 )
 
 // LinuxPkg is the import path of the generated kernel bindings.

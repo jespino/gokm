@@ -14,7 +14,7 @@ import (
 	"strings"
 	"text/template"
 
-	"gokm/internal/build"
+	"github.com/jespino/gokm/internal/build"
 )
 
 const version = "0.1.0"

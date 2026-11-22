@@ -1,5 +1,5 @@
-# Developer targets for gokm itself. Users just need `go install .` (or
-# `make`) and then `gokm init` / `gokm build`.
+# Developer targets for gokm itself. Users can install with
+# `go install github.com/jespino/gokm@latest`, then run `gokm init` / `gokm build`.
 #
 #   make                       build ./gokm
 #   make test                  vet + unit tests

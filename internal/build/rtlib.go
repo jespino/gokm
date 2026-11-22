@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"gokm/internal/assets"
+	"github.com/jespino/gokm/internal/assets"
 )
 
 // rtCFlags compile compiler-rt's builtins for the kernel: the kernel codegen

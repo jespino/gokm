@@ -38,9 +38,7 @@ avoids that.
 ## 2. Install gokm
 
 ```sh
-git clone https://github.com/jespino/gokm
-cd gokm
-go install .            # puts gokm in $(go env GOPATH)/bin
+go install github.com/jespino/gokm@latest
 ```
 
 Make sure `$(go env GOPATH)/bin` is in your `PATH`, then run `gokm` with no
