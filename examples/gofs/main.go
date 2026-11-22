@@ -14,9 +14,10 @@ import (
 
 func main() {
 	err := fs.Register(&fs.FileSystem{
-		Name:  "gofs",
-		Magic: 0x676f6673, // "gofs"
-		Mount: func() (fs.Dir, error) { return newDir(0o755), nil },
+		Name:      "gofs",
+		Magic:     0x676f6673, // "gofs"
+		MaxIOSize: 1 << 20,
+		Mount:     func() (fs.Dir, error) { return newDir(0o755), nil },
 	})
 	if err != nil {
 		kernel.FailLoad(err)

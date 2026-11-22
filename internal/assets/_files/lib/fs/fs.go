@@ -55,9 +55,19 @@ func (m Mode) IsSymlink() bool { return m&ModeType == ModeSymlink }
 type Attr struct {
 	Mode Mode  // type and permissions
 	Size int64 // size in bytes (regular files)
+	// Nlink, when nonzero, initializes the inode's persistent link count.
+	// Filesystems supporting hard links must report the actual count here.
+	Nlink uint32
+	// Generation distinguishes reused persistent inode numbers.
+	Generation uint32
+	// Owner, when set, supplies ownership in the initial user namespace.
+	// A nil Owner preserves the framework's default/VFS-assigned ownership.
+	Owner *Owner
 	// Timestamps; zero values leave the kernel's in-memory ones.
 	Atime, Mtime, Ctime time.Time
 }
+
+type Owner struct{ UID, GID uint32 }
 
 // Node is anything in the filesystem.
 type Node interface {
@@ -78,6 +88,49 @@ type Dir interface {
 // Optional interfaces. Operations a node doesn't implement fail with EPERM
 // (directories) or EINVAL / EBADF (files).
 type (
+	// DirReader resumes iteration without scanning an entire directory.
+	// Cookie 0 means the beginning. Yield cookies must strictly increase,
+	// fit in [1, 2^63-3], and remain valid across calls (deleted entries may
+	// leave gaps). Stop when yield returns false. Dir.ReadDir remains needed
+	// for emptiness checks; this interface handles resumable VFS iteration.
+	DirReader interface {
+		ReadDirFrom(cookie uint64, yield func(next uint64, name string, n Node) bool) error
+	}
+	// Identifier supplies a persistent inode number. Root must use 1; other
+	// IDs must be in [2, 2^63-1]. Return the same Node for a live ID, including
+	// hard-link aliases. Never reuse an ID while the old node is live.
+	Identifier interface {
+		InodeID() uint64
+	}
+	// Linker adds a regular-file hard link. It must retain the exact target
+	// node, atomically increment its persistent link count, and return EEXIST
+	// if name exists. Remove and replacement Rename must decrement counts.
+	Linker interface {
+		Link(name string, target Node) error
+	}
+	// FileSyncer implements fsync/fdatasync on a file or directory. Start and
+	// end are inclusive byte offsets (directory calls cover the whole node).
+	// It must durably commit the captured generation and its dependencies,
+	// including device cache flushes. No mount-wide Sync/device sync follows
+	// this callback. Without it, the framework uses the legacy root Syncer
+	// followed by a device sync and cache flush.
+	FileSyncer interface {
+		Fsync(start, end int64, datasync bool) error
+	}
+	// Opener and Releaser observe an open file description, not each dup or
+	// VMA. Release runs after the last descriptor/VMA reference is gone. Flags
+	// use Linux O_* values. Open may reject an operation; Release cannot fail.
+	Opener interface {
+		Open(flags uint32) error
+	}
+	Releaser interface {
+		Release(flags uint32)
+	}
+	// Evicter releases cached node state when a kernel inode is evicted,
+	// including linked persistent nodes. It must not free linked storage.
+	// Identifier nodes are then removed from the framework's node cache, so
+	// future Lookup may reconstruct them. Forgetter is only for final unlink.
+	Evicter interface{ Evict() }
 	// Creator creates regular files in a directory.
 	Creator interface {
 		Create(name string, mode Mode) (Node, error)
@@ -146,12 +199,18 @@ type FileSystem struct {
 	Magic uint32
 	// Mount is called for each mount and returns its root directory.
 	Mount func() (Dir, error)
+	// MountWithOptions is the nodev alternative to Mount that receives options.
+	MountWithOptions func(opts MountOptions) (Dir, error)
 	// MountDevice, instead of Mount, makes this a block-device filesystem
 	// (mount -t name /dev/... /mnt): it gets the device and returns the
 	// root directory.
 	MountDevice func(dev *Device, opts MountOptions) (Dir, error)
 	// MaxFileSize limits file sizes (default: the kernel's maximum).
 	MaxFileSize int64
+	// MaxIOSize bounds one callback read/write buffer. Zero keeps the legacy
+	// 128 KiB limit. Values from 4 KiB to 16 MiB allow large streaming writes
+	// without splitting every syscall at 128 KiB. Native reads are not capped.
+	MaxIOSize int
 
 	ptr    uintptr // kernel struct, 0 when not registered
 	handle kernel.Handle
@@ -160,7 +219,7 @@ type FileSystem struct {
 // Implemented in the fs glue (gokm/frameworks/fs/fs.c).
 //
 //export gokm_fs_register
-func cRegister(name *byte, nameLen int, magic uint32, requiresDev bool, maxBytes int64, handle uintptr, out *uintptr) int
+func cRegister(name *byte, nameLen int, magic uint32, requiresDev bool, maxBytes int64, maxIO int, handle uintptr, out *uintptr) int
 
 //export gokm_fs_unregister
 func cUnregister(ptr uintptr)
@@ -168,11 +227,27 @@ func cUnregister(ptr uintptr)
 //export gokm_fs_emit
 func cEmit(ctx uintptr, name *byte, nameLen int, ino uint64, dtype uint32) bool
 
+//export gokm_fs_emit_cookie
+func cEmitCookie(ctx uintptr, name *byte, nameLen int, ino uint64, dtype uint32, next int64) bool
+
 // Register registers the filesystem type with the kernel. It's unregistered
 // automatically at module exit (or earlier with Unregister).
 func Register(f *FileSystem) error {
-	if f.Name == "" || (f.Mount == nil) == (f.MountDevice == nil) {
-		return kernel.EINVAL // exactly one of Mount and MountDevice
+	constructors := 0
+	if f.Mount != nil {
+		constructors++
+	}
+	if f.MountWithOptions != nil {
+		constructors++
+	}
+	if f.MountDevice != nil {
+		constructors++
+	}
+	if f.Name == "" || constructors != 1 {
+		return kernel.EINVAL
+	}
+	if f.MaxFileSize < 0 || (f.MaxIOSize != 0 && (f.MaxIOSize < 4096 || f.MaxIOSize > 16<<20)) {
+		return kernel.EINVAL
 	}
 	if f.ptr != 0 {
 		return kernel.EBUSY
@@ -182,7 +257,7 @@ func Register(f *FileSystem) error {
 	}
 	f.handle = kernel.NewHandle(f)
 	name := f.Name + "\x00"
-	if rc := cRegister(unsafe.StringData(name), len(f.Name), f.Magic, f.MountDevice != nil, f.MaxFileSize, uintptr(f.handle), &f.ptr); rc != 0 {
+	if rc := cRegister(unsafe.StringData(name), len(f.Name), f.Magic, f.MountDevice != nil, f.MaxFileSize, f.MaxIOSize, uintptr(f.handle), &f.ptr); rc != 0 {
 		f.handle.Delete()
 		f.ptr = 0
 		return kernel.Errno(-rc)
@@ -221,18 +296,37 @@ func keyOf(n Node) nodeKey { return *(*nodeKey)(unsafe.Pointer(&n)) }
 
 const rootIno = 1
 
-func (m *mount) ino(n Node) uint64 {
+func (m *mount) ino(n Node) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	k := keyOf(n)
 	if ino, ok := m.inos[k]; ok {
-		return ino
+		return int64(ino)
 	}
-	ino := m.next
-	m.next++
+	var ino uint64
+	if id, ok := n.(Identifier); ok {
+		ino = id.InodeID()
+		if ino == 0 || ino > uint64(^uint64(0)>>1) {
+			return -int64(kernel.EINVAL)
+		}
+		if _, exists := m.nodes[ino]; exists {
+			return -int64(kernel.EEXIST)
+		}
+	} else {
+		for {
+			ino = m.next
+			if ino == 0 || ino > uint64(^uint64(0)>>1) {
+				return -int64(kernel.EOVERFLOW)
+			}
+			m.next++
+			if _, exists := m.nodes[ino]; !exists {
+				break
+			}
+		}
+	}
 	m.nodes[ino] = n
 	m.inos[k] = ino
-	return ino
+	return int64(ino)
 }
 
 func (m *mount) forget(ino uint64) {
@@ -265,6 +359,17 @@ func (m *mount) dir(ino uint64) (Dir, int) {
 	return d, 0
 }
 
+func (m *mount) entryIno(n Node) int64 {
+	if id, ok := n.(Identifier); ok {
+		num := id.InodeID()
+		if num == 0 || num > uint64(^uint64(0)>>1) {
+			return -int64(kernel.EINVAL)
+		}
+		return int64(num)
+	}
+	return m.ino(n)
+}
+
 // withType fills in the type bits of a node's mode if Attr left them out.
 func withType(n Node, mode Mode) Mode {
 	if mode&ModeType != 0 {
@@ -292,16 +397,22 @@ func viewBytes(p *byte, n int) []byte {
 // GOKM_LEAVE. Go int is 64 bits (long in C).
 
 //export gokm_fs_go_mount
-func goMount(fsHandle, sb uintptr, blockSize int, size int64, readOnly bool, out *uintptr) (rc int) {
+func goMount(fsHandle, sb uintptr, blockSize int, size int64, readOnly bool, options *byte, optionsLen int, out *uintptr) (rc int) {
 	rc = -int(kernel.EIO)
 	defer kernel.CatchPanic[int](nil)
 	f := kernel.Handle(fsHandle).Value().(*FileSystem)
 	var root Dir
 	var err error
+	opts := MountOptions{ReadOnly: readOnly, Options: string(viewBytes(options, optionsLen))}
 	if f.MountDevice != nil {
 		dev := &Device{sb: sb, blockSize: blockSize, size: size, readOnly: readOnly}
-		root, err = f.MountDevice(dev, MountOptions{ReadOnly: readOnly})
+		root, err = f.MountDevice(dev, opts)
+	} else if f.MountWithOptions != nil {
+		root, err = f.MountWithOptions(opts)
 	} else {
+		if opts.Options != "" {
+			return -int(kernel.EINVAL)
+		}
 		root, err = f.Mount()
 	}
 	if err != nil {
@@ -311,7 +422,12 @@ func goMount(fsHandle, sb uintptr, blockSize int, size int64, readOnly bool, out
 		return -int(kernel.EINVAL)
 	}
 	m := &mount{root: root, nodes: map[uint64]Node{}, inos: map[nodeKey]uint64{}, next: rootIno}
-	m.ino(root)
+	if ino := m.ino(root); ino != rootIno {
+		if u, ok := root.(Unmounter); ok {
+			u.Unmount()
+		}
+		return -int(kernel.EINVAL)
+	}
 	*out = uintptr(kernel.NewHandle(m))
 	return 0
 }
@@ -333,7 +449,7 @@ func goRelease(h uintptr) {
 }
 
 //export gokm_fs_go_stat
-func goStat(h uintptr, ino uint64, mode *uint32, size, atime, mtime, ctime *int64) (rc int) {
+func goStat(h uintptr, ino uint64, mode, nlink, generation, uid, gid *uint32, owner *bool, size, atime, mtime, ctime *int64) (rc int) {
 	rc = -int(kernel.EIO)
 	defer kernel.CatchPanic[int](nil)
 	n, ok := getMount(h).node(ino)
@@ -343,6 +459,11 @@ func goStat(h uintptr, ino uint64, mode *uint32, size, atime, mtime, ctime *int6
 	a := n.Attr()
 	a.Mode = withType(n, a.Mode)
 	*mode = uint32(a.Mode)
+	*nlink, *generation = a.Nlink, a.Generation
+	*owner = a.Owner != nil
+	if a.Owner != nil {
+		*uid, *gid = a.Owner.UID, a.Owner.GID
+	}
 	*size = a.Size
 	*atime, *mtime, *ctime = nsOf(a.Atime), nsOf(a.Mtime), nsOf(a.Ctime)
 	if a.Mode.IsSymlink() && a.Size == 0 {
@@ -431,7 +552,10 @@ func goRemove(h uintptr, dirIno uint64, name *byte, nameLen int, isDir bool) (rc
 	nm := viewString(name, nameLen)
 	if isDir {
 		child, err := d.Lookup(nm)
-		if err != nil || child == nil {
+		if err != nil {
+			return kernel.ToErrno(err)
+		}
+		if child == nil {
 			return -int(kernel.ENOENT)
 		}
 		cd, ok := child.(Dir)
@@ -439,7 +563,9 @@ func goRemove(h uintptr, dirIno uint64, name *byte, nameLen int, isDir bool) (rc
 			return -int(kernel.ENOTDIR)
 		}
 		empty := true
-		cd.ReadDir(func(string, Node) bool { empty = false; return false })
+		if err := cd.ReadDir(func(string, Node) bool { empty = false; return false }); err != nil {
+			return kernel.ToErrno(err)
+		}
 		if !empty {
 			return -int(kernel.ENOTEMPTY)
 		}
@@ -447,8 +573,6 @@ func goRemove(h uintptr, dirIno uint64, name *byte, nameLen int, isDir bool) (rc
 	return kernel.ToErrno(rm.Remove(nm))
 }
 
-// gokm_fs_go_evict: the kernel dropped the inode of an unlinked node.
-//
 //export gokm_fs_go_rename
 func goRename(h uintptr, oldDirIno uint64, oldName *byte, oldLen int, newDirIno uint64, newName *byte, newLen int) (rc int) {
 	rc = -int(kernel.EIO)
@@ -468,16 +592,69 @@ func goRename(h uintptr, oldDirIno uint64, oldName *byte, oldLen int, newDirIno 
 	}
 	nn := string(viewBytes(newName, newLen))
 	// Replacing a directory requires it to be empty.
-	if target, err := nd.Lookup(nn); err == nil && target != nil {
+	target, err := nd.Lookup(nn)
+	if err != nil && err != kernel.ENOENT {
+		return kernel.ToErrno(err)
+	}
+	if target != nil {
 		if td, ok := target.(Dir); ok {
 			empty := true
-			td.ReadDir(func(string, Node) bool { empty = false; return false })
+			if err := td.ReadDir(func(string, Node) bool { empty = false; return false }); err != nil {
+				return kernel.ToErrno(err)
+			}
 			if !empty {
 				return -int(kernel.ENOTEMPTY)
 			}
 		}
 	}
 	return kernel.ToErrno(r.Rename(string(viewBytes(oldName, oldLen)), nd, nn))
+}
+
+//export gokm_fs_go_link
+func goLink(h uintptr, dirIno, targetIno uint64, name *byte, nameLen int) (rc int) {
+	rc = -int(kernel.EIO)
+	defer kernel.CatchPanic[int](nil)
+	m := getMount(h)
+	d, errno := m.dir(dirIno)
+	if errno != 0 {
+		return errno
+	}
+	l, ok := d.(Linker)
+	if !ok {
+		return -int(kernel.EOPNOTSUPP)
+	}
+	n, ok := m.node(targetIno)
+	if !ok {
+		return -int(kernel.ENOENT)
+	}
+	if !withType(n, n.Attr().Mode).IsRegular() {
+		return -int(kernel.EPERM)
+	}
+	return kernel.ToErrno(l.Link(string(viewBytes(name, nameLen)), n))
+}
+
+//export gokm_fs_go_open
+func goOpen(h uintptr, ino uint64, flags uint32) (rc int) {
+	rc = -int(kernel.EIO)
+	defer kernel.CatchPanic[int](nil)
+	n, ok := getMount(h).node(ino)
+	if !ok {
+		return -int(kernel.ENOENT)
+	}
+	if o, ok := n.(Opener); ok {
+		return kernel.ToErrno(o.Open(flags))
+	}
+	return 0
+}
+
+//export gokm_fs_go_close
+func goClose(h uintptr, ino uint64, flags uint32) {
+	defer kernel.CatchPanic[int](nil)
+	if n, ok := getMount(h).node(ino); ok {
+		if r, ok := n.(Releaser); ok {
+			r.Release(flags)
+		}
+	}
 }
 
 //export gokm_fs_go_symlink
@@ -530,12 +707,18 @@ func goReadlink(h uintptr, ino uint64, buf **byte, n *int) (rc int) {
 }
 
 //export gokm_fs_go_evict
-func goEvict(h uintptr, ino uint64) {
+func goEvict(h uintptr, ino uint64, unlinked bool) {
 	defer kernel.CatchPanic[int](nil)
 	m := getMount(h)
 	if n, ok := m.node(ino); ok {
-		if f, ok := n.(Forgetter); ok {
+		if f, ok := n.(Forgetter); ok && unlinked {
 			f.Forget()
+		}
+		if e, ok := n.(Evicter); ok {
+			e.Evict()
+		}
+		if _, persistent := n.(Identifier); !unlinked && !persistent {
+			return
 		}
 	}
 	m.forget(ino)
@@ -606,7 +789,36 @@ func goIterate(h uintptr, dirIno uint64, start int64, ctx uintptr) (rc int) {
 	if errno != 0 {
 		return errno
 	}
+	if start < 0 {
+		return -int(kernel.EINVAL)
+	}
+	if reader, ok := d.(DirReader); ok {
+		var emitErr int
+		cookie := uint64(start)
+		err := reader.ReadDirFrom(cookie, func(next uint64, name string, n Node) bool {
+			if next <= cookie || next > uint64(^uint64(0)>>1)-2 || n == nil {
+				emitErr = -int(kernel.EINVAL)
+				return false
+			}
+			ino := m.entryIno(n)
+			if ino < 0 {
+				emitErr = int(ino)
+				return false
+			}
+			mode := withType(n, n.Attr().Mode)
+			if !cEmitCookie(ctx, unsafe.StringData(name), len(name), uint64(ino), uint32(mode&ModeType)>>12, int64(next)+2) {
+				return false
+			}
+			cookie = next
+			return true
+		})
+		if emitErr != 0 {
+			return emitErr
+		}
+		return kernel.ToErrno(err)
+	}
 	var i int64
+	var iterateErr int
 	err := d.ReadDir(func(name string, n Node) bool {
 		if i++; i <= start {
 			return true
@@ -615,8 +827,18 @@ func goIterate(h uintptr, dirIno uint64, start int64, ctx uintptr) (rc int) {
 			return true // skip: entries need a node (and inode number)
 		}
 		mode := withType(n, n.Attr().Mode)
-		return cEmit(ctx, unsafe.StringData(name), len(name), m.ino(n), uint32(mode&ModeType)>>12)
+		// Persistent entries need no node-cache slot merely to report an ID.
+		// Otherwise a large readdir would retain every Node without iget/evict.
+		ino := m.entryIno(n)
+		if ino < 0 {
+			iterateErr = int(ino)
+			return false
+		}
+		return cEmit(ctx, unsafe.StringData(name), len(name), uint64(ino), uint32(mode&ModeType)>>12)
 	})
+	if iterateErr != 0 {
+		return iterateErr
+	}
 	return kernel.ToErrno(err)
 }
 

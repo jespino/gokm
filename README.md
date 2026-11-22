@@ -44,6 +44,12 @@ It's the same approach as [gopgext](https://github.com/jespino/gopgext)
 the host, a C runtime compiled by the host's own build system (kbuild here,
 PGXS there), and generated glue.
 
+For persistent filesystems, `gokm/fs` provides directory/per-node sync, regular
+hard links, persistent inode identity and lifecycle hooks, device flush/FUA
+operations, and opt-in native sealed extent reads. See the
+[storage API guide](site/content/docs/filesystem-storage.md) for contracts and
+limitations; allocation and crash recovery remain filesystem responsibilities.
+
 ## Install
 
 Requirements: Linux x86-64, Go, TinyGo (tested with 0.43.0), the kernel

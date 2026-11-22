@@ -22,6 +22,10 @@ type Device struct {
 // MountOptions describes a mount.
 type MountOptions struct {
 	ReadOnly bool
+	// Options contains comma-separated filesystem-specific mount options.
+	// VFS options (ro, noexec, etc.) are handled by Linux. Implementations
+	// must reject unknown options instead of silently ignoring them.
+	Options string
 }
 
 // Implemented in the fs glue (gokm/frameworks/fs/fs.c).
@@ -33,10 +37,27 @@ func cDevRead(sb uintptr, block uint64, dst *byte, nblocks int) int
 func cDevWrite(sb uintptr, block uint64, src *byte, nblocks int) int
 
 //export gokm_fs_dev_sync
-func cDevSync(sb uintptr) int
+func cDevSync(sb uintptr, flush bool) int
 
 //export gokm_fs_dev_set_blocksize
 func cDevSetBlockSize(sb uintptr, size int) int
+
+//export gokm_fs_dev_info
+func cDevInfo(sb uintptr, logical, physical *uint32, cache, fua *bool)
+
+// DeviceInfo describes the queue properties reported by the block layer.
+// WriteCache=false means no volatile write cache is advertised, not that
+// hardware has been independently verified. Linux handles FUA emulation.
+type DeviceInfo struct {
+	LogicalBlockSize, PhysicalBlockSize uint32
+	WriteCache, FUA                     bool
+}
+
+func (d *Device) Info() DeviceInfo {
+	var info DeviceInfo
+	cDevInfo(d.sb, &info.LogicalBlockSize, &info.PhysicalBlockSize, &info.WriteCache, &info.FUA)
+	return info
+}
 
 // BlockSize returns the block size used by ReadBlocks/WriteBlocks (512 at
 // mount time).
@@ -52,8 +73,12 @@ func (d *Device) Blocks() uint64 { return uint64(d.size) / uint64(d.blockSize) }
 func (d *Device) ReadOnly() bool { return d.readOnly }
 
 // SetBlockSize changes the block size (a power of two between the device's
-// logical block size and the page size).
+// logical block size and the page size). Call only during mount, before any
+// I/O or inode creation. It must not race with device operations.
 func (d *Device) SetBlockSize(size int) error {
+	if size <= 0 || size&(size-1) != 0 {
+		return kernel.EINVAL
+	}
 	if rc := cDevSetBlockSize(d.sb, size); rc != 0 {
 		return kernel.Errno(-rc)
 	}
@@ -67,7 +92,7 @@ func (d *Device) SetBlockSize(size int) error {
 // for the device.
 func (d *Device) ReadBlocks(block uint64, p []byte) error {
 	n := len(p) / d.blockSize
-	if n == 0 || len(p)%d.blockSize != 0 {
+	if n == 0 || len(p)%d.blockSize != 0 || block > d.Blocks() || uint64(n) > d.Blocks()-block {
 		return kernel.EINVAL
 	}
 	if rc := cDevRead(d.sb, block, &p[0], n); rc != 0 {
@@ -81,7 +106,7 @@ func (d *Device) ReadBlocks(block uint64, p []byte) error {
 // Sync.
 func (d *Device) WriteBlocks(block uint64, p []byte) error {
 	n := len(p) / d.blockSize
-	if n == 0 || len(p)%d.blockSize != 0 {
+	if n == 0 || len(p)%d.blockSize != 0 || block > d.Blocks() || uint64(n) > d.Blocks()-block {
 		return kernel.EINVAL
 	}
 	if d.readOnly {
@@ -93,9 +118,20 @@ func (d *Device) WriteBlocks(block uint64, p []byte) error {
 	return nil
 }
 
-// Sync writes all dirty blocks of the device and waits for them.
+// Sync writes dirty buffer-cache blocks, waits, and flushes the device's
+// volatile write cache. A successful return is a persistence barrier for
+// preceding buffered writes. It does not construct filesystem transactions.
 func (d *Device) Sync() error {
-	if rc := cDevSync(d.sb); rc != 0 {
+	if rc := cDevSync(d.sb, true); rc != 0 {
+		return kernel.Errno(-rc)
+	}
+	return nil
+}
+
+// Writeback waits for dirty buffer-cache blocks without flushing the device's
+// volatile cache. This is NOT a durability barrier. Use Sync for persistence.
+func (d *Device) Writeback() error {
+	if rc := cDevSync(d.sb, false); rc != 0 {
 		return kernel.Errno(-rc)
 	}
 	return nil
@@ -179,6 +215,22 @@ func goSync(h uintptr) (rc int) {
 		return kernel.ToErrno(s.Sync())
 	}
 	return 0
+}
+
+//export gokm_fs_go_fsync
+func goFsync(h uintptr, ino uint64, start, end int64, datasync bool, handled *bool) (rc int) {
+	rc = -int(kernel.EIO)
+	defer kernel.CatchPanic[int](nil)
+	*handled = false
+	n, ok := getMount(h).node(ino)
+	if !ok {
+		return -int(kernel.ENOENT)
+	}
+	if s, ok := n.(FileSyncer); ok {
+		*handled = true
+		return kernel.ToErrno(s.Fsync(start, end, datasync))
+	}
+	return goSync(h)
 }
 
 //export gokm_fs_go_settimes

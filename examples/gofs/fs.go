@@ -64,7 +64,7 @@ func (d *dir) add(name string, n fs.Node) error {
 func (d *dir) Create(name string, mode fs.Mode) (fs.Node, error) {
 	mu.Lock()
 	defer mu.Unlock()
-	f := &file{mode: mode & fs.ModePerm}
+	f := &file{mode: mode & fs.ModePerm, links: 1}
 	return f, d.add(name, f)
 }
 
@@ -78,7 +78,24 @@ func (d *dir) Mkdir(name string, mode fs.Mode) (fs.Dir, error) {
 func (d *dir) Remove(name string) error {
 	mu.Lock()
 	defer mu.Unlock()
+	if f, ok := d.children[name].(*file); ok {
+		f.links--
+	}
 	return d.removeLocked(name)
+}
+
+func (d *dir) Link(name string, target fs.Node) error {
+	mu.Lock()
+	defer mu.Unlock()
+	f, ok := target.(*file)
+	if !ok {
+		return kernel.EPERM
+	}
+	if err := d.add(name, f); err != nil {
+		return err
+	}
+	f.links++
+	return nil
 }
 
 func (d *dir) removeLocked(name string) error {
@@ -102,6 +119,12 @@ func (d *dir) Rename(oldName string, newDir fs.Dir, newName string) error {
 	n := d.children[oldName]
 	if n == nil {
 		return kernel.ENOENT
+	}
+	if nd.children[newName] == n {
+		return nil
+	}
+	if f, ok := nd.children[newName].(*file); ok {
+		f.links--
 	}
 	if nd.children[newName] != nil {
 		nd.removeLocked(newName) // replaced
@@ -129,14 +152,15 @@ func (l *symlink) Readlink() (string, error) { return l.target, nil }
 // file is a regular file held in a Go byte slice.
 type file struct {
 	xattrs
-	mode fs.Mode
-	data []byte
+	mode  fs.Mode
+	links uint32
+	data  []byte
 }
 
 func (f *file) Attr() fs.Attr {
 	mu.Lock()
 	defer mu.Unlock()
-	return fs.Attr{Mode: fs.ModeRegular | f.mode, Size: int64(len(f.data))}
+	return fs.Attr{Mode: fs.ModeRegular | f.mode, Size: int64(len(f.data)), Nlink: f.links}
 }
 
 func (f *file) ReadAt(p []byte, off int64) (int, error) {

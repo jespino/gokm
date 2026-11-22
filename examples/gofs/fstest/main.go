@@ -323,6 +323,7 @@ func main() {
 		return os.RemoveAll(p("r3"))
 	}())
 
+	storageContractTests()
 	mmapTests()
 	xattrTests()
 
