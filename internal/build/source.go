@@ -271,7 +271,7 @@ func (b *builder) generateBindings(scan *sourceScan, kdir, work, genDir string, 
 // signature from there. Names that don't compile are left out (the
 // generator reports them).
 func (b *builder) probeInlines(kdir, dir string, goNames, headers []string) (map[string]*bindgen.InlineDecl, error) {
-	b.step("looking up static inline functions: %s", strings.Join(goNames, " "))
+	b.Step("looking up static inline functions: %s", strings.Join(goNames, " "))
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
 	}
@@ -292,7 +292,7 @@ func (b *builder) probeInlines(kdir, dir string, goNames, headers []string) (map
 		return nil, err
 	}
 	args := append([]string{"-k", fmt.Sprintf("-j%d", runtime.NumCPU()), "-C", kdir, "M=" + dir}, objs...)
-	b.exec(exec.Command("make", args...)) // failures: names that aren't inline functions
+	b.Exec(exec.Command("make", args...)) // failures: names that aren't inline functions
 
 	out := map[string]*bindgen.InlineDecl{}
 	for i, n := range goNames {
@@ -313,7 +313,7 @@ func (b *builder) probeInlines(kdir, dir string, goNames, headers []string) (map
 // headers (with kbuild, so with the kernel's exact flags and config) and
 // reading the values from the object file.
 func (b *builder) probeMacros(kdir, dir string, names, headers []string) (map[string]bindgen.Const, error) {
-	b.step("evaluating kernel macros: %s", strings.Join(names, " "))
+	b.Step("evaluating kernel macros: %s", strings.Join(names, " "))
 	if err := os.RemoveAll(dir); err != nil {
 		return nil, err
 	}
@@ -332,7 +332,7 @@ func (b *builder) probeMacros(kdir, dir string, names, headers []string) (map[st
 	if err := os.WriteFile(filepath.Join(dir, "Kbuild"), []byte("obj-m := probe.o\n"), 0o644); err != nil {
 		return nil, err
 	}
-	if err := b.exec(exec.Command("make", "-C", kdir, "M="+dir, "probe.o")); err != nil {
+	if err := b.Exec(exec.Command("make", "-C", kdir, "M="+dir, "probe.o")); err != nil {
 		return nil, fmt.Errorf("evaluating macros %s (they must be integer constants): %w", strings.Join(names, ", "), err)
 	}
 

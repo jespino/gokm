@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/jespino/gokm/internal/assets"
+	"github.com/jespino/tinyguest/project"
 )
 
 // rtCFlags compile compiler-rt's builtins for the kernel: the kernel codegen
@@ -43,7 +44,7 @@ type rtObject struct {
 
 func (b *builder) prepareRTLib(root *assets.Root, cacheDir, tinygoVersion string) (*rtLib, error) {
 	// Depends only on the TinyGo install and the flags, not gokm's assets.
-	dir := filepath.Join(cacheDir, "rtlib-"+shortHash(tinygoVersion+"\x00"+strings.Join(rtCFlags, " ")))
+	dir := filepath.Join(cacheDir, "rtlib-"+project.ShortHash(tinygoVersion+"\x00"+strings.Join(rtCFlags, " ")))
 	index := filepath.Join(dir, "index.json")
 	lib := &rtLib{}
 	if data, err := os.ReadFile(index); err == nil && json.Unmarshal(data, &lib.Objects) == nil {
@@ -51,7 +52,7 @@ func (b *builder) prepareRTLib(root *assets.Root, cacheDir, tinygoVersion string
 		return lib, nil
 	}
 
-	b.step("compiling compiler-rt builtins for the kernel (once per TinyGo install)")
+	b.Step("compiling compiler-rt builtins for the kernel (once per TinyGo install)")
 	src, include := rtSourceDirs(root.TinyGoRoot)
 	files, err := filepath.Glob(filepath.Join(src, "*.c"))
 	if err != nil || len(files) == 0 {

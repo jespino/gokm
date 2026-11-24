@@ -55,7 +55,7 @@ qemu: gokm
 
 # The API reference pages are generated from the packages' doc comments.
 site-api:
-	cd site/apidoc && go run . -src ../../internal/assets/_files/lib -import gokm -out ../content/api
+	go run github.com/jespino/tinyguest/cmd/apidoc -src internal/assets/_files/lib -import gokm -out site/content/api
 
 site: site-api
 	$(HUGO) --source site --minify --gc
